@@ -1,0 +1,8 @@
+{
+  "0": {
+    "capture_width": 640,
+    "capture_height": 480,
+    "inference_size": 640,
+    "center_crop_to_reference": true
+  }
+}

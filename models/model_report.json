@@ -1,0 +1,29 @@
+{
+  "source_checkpoint": "C:\\Users\\karas\\OneDrive\\\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b\\laser beam\\runs\\balloon_camera_varied\\weights\\best.pt",
+  "live_check": {
+    "frames": 150,
+    "frames_with_two_detections": 147,
+    "minimum_detection_count": 1,
+    "maximum_detection_count": 2,
+    "excluded_hardware_detections": 0,
+    "confidence_range": [
+      0.358786016702652,
+      0.9116863012313843
+    ],
+    "fps": 22.23234040736604
+  },
+  "training_validation": {
+    "metrics/precision(B)": 0.87334,
+    "metrics/recall(B)": 0.74,
+    "metrics/mAP50(B)": 0.85083,
+    "metrics/mAP50-95(B)": 0.70949
+  },
+  "best_epoch": 33,
+  "data": {
+    "independent_local_frames": 2,
+    "synthetic_training_augmentations": 96,
+    "original_train_images": 61,
+    "original_validation_images": 13
+  },
+  "limitations": "Local scene adaptation; live detection count is not a ground-truth precision/recall measurement."
+}

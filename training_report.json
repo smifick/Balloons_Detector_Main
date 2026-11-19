@@ -1,0 +1,21 @@
+{
+  "metrics": {
+    "metrics/precision(B)": 0.9009080620865055,
+    "metrics/recall(B)": 0.74,
+    "metrics/mAP50(B)": 0.7898108656218418,
+    "metrics/mAP50-95(B)": 0.6372014672443773,
+    "fitness": 0.6372014672443773
+  },
+  "speed_ms": {
+    "preprocess": 1.9364461538946043,
+    "inference": 25.14628461526277,
+    "loss": 0.0006692305480380758,
+    "postprocess": 1.916138461708145
+  },
+  "gpu": "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "torch": "2.7.1+cu128",
+  "weights": "C:\\Users\\karas\\OneDrive\\\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u044b\\laser beam\\runs\\balloon_yolov8n\\weights\\best.pt",
+  "limitations": "13-image validation split; no independent test set or AR0234 camera footage. Color accuracy is not separately measured.",
+  "epochs_completed": 69,
+  "best_epoch": 49
+}

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="control-token" content="__CONTROL_TOKEN__">
+  <meta name="theme-color" content="#0c1113">
+  <title>Balloon Control — SimpleBGC</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/video_view.js" defer></script>
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <aside class="rail" aria-label="Навигация">
+    <a class="brand-symbol" href="/" aria-label="Balloon Control">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M5 12V5h7M20 5h7v7M27 20v7h-7M12 27H5v-7"/><circle cx="16" cy="16" r="5"/><path d="M16 8v4m0 8v4M8 16h4m8 0h4"/></svg>
+    </a>
+    <button class="rail-button active" id="view-control" title="Управление" aria-label="Управление"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><path d="M12 1v6m0 10v6M1 12h6m10 0h6"/></svg></button>
+    <button class="rail-button" id="view-log" title="Журнал событий" aria-label="Журнал событий"><svg viewBox="0 0 24 24"><path d="M4 19V5h16v14zM8 9h8m-8 4h5"/></svg></button>
+    <div class="rail-bottom"><span class="rail-indicator" id="rail-online"></span><span>LOCAL</span></div>
+  </aside>
+
+  <main>
+    <header class="page-header">
+      <div><div class="eyebrow">BALLOON <span>/</span> CONTROL</div><h1>Панель наведения<span class="title-dot">.</span></h1><p>Выберите шарик в кадре и наведите камеру на его центр.</p></div>
+      <div class="header-meta"><span class="local-tag"><span class="status-dot" id="connection-dot"></span><span id="connection-text">Подключение к панели</span></span><div class="hardware-tags"><span>AR0234</span><span>GM6208</span><span>SimpleBGC v3</span></div></div>
+    </header>
+
+    <div class="simulation-banner hidden" id="simulation-banner"><span class="status-dot amber"></span>Симуляция контроллера <span>Команды проверяются без движения моторов</span></div>
+
+    <div class="workspace">
+      <section class="vision-column" aria-label="Камера и цели">
+        <div class="panel video-panel">
+          <div class="panel-top"><div class="section-label"><span>01</span> ВИДЕОПОТОК</div><div class="video-status"><span class="status-dot" id="camera-dot"></span><span id="camera-label">Камера выключена</span><button id="fullscreen" class="icon-button" title="Полный экран" aria-label="Полный экран"><svg viewBox="0 0 24 24"><path d="M4 9V4h5m6 0h5v5M4 15v5h5m6 0h5v-5"/></svg></button></div></div>
+          <div class="video-stage" id="video-stage">
+            <canvas id="video" width="640" height="480" aria-label="Видео с камеры. Выберите шарик кликом."></canvas>
+            <div class="video-placeholder" id="video-placeholder"><div class="reticle-placeholder"><span></span></div><h2 id="placeholder-title">Подключаем камеру</h2><p id="placeholder-text">Загружаем детектор воздушных шариков</p></div>
+            <div class="video-corner top-left" id="video-resolution">CAM 00 · USB / UVC</div>
+            <div class="video-corner top-right"><span class="record-light"></span> LIVE</div>
+            <div class="video-bottom-hint" id="video-hint">Кликните по шарику, чтобы выбрать цель</div>
+          </div>
+          <div class="video-zoom-toolbar" aria-label="Увеличение видео">
+            <div class="zoom-buttons"><button type="button" id="zoom-out" aria-label="Уменьшить видео" disabled>−</button><output id="zoom-level" aria-live="polite">1×</output><button type="button" id="zoom-in" aria-label="Увеличить видео">+</button><button type="button" id="zoom-reset" disabled>Весь кадр</button></div>
+            <span class="zoom-help">Колесо — приблизить к курсору · Потяни кадр для обзора</span>
+          </div>
+          <div class="video-toolbar"><div class="camera-select"><svg viewBox="0 0 24 24"><path d="M3 7h12v11H3zM15 10l6-3v11l-6-3z"/></svg><label for="camera-source" class="sr-only">Индекс камеры</label><select id="camera-source"><option value="0">Камера 0</option><option value="1">Камера 1</option><option value="2">Камера 2</option><option value="3">Камера 3</option></select><button class="text-button" id="camera-toggle">Запустить</button></div><div class="video-numbers"><span><b id="fps">—</b> FPS</span><span><b id="inference">—</b> мс</span><span id="resolution">640 × 480</span></div></div>
+        </div>
+
+        <div class="metrics-row">
+          <div class="metric"><span class="metric-label">ЦЕЛЬ В КАДРЕ</span><div><strong id="target-count">0</strong><span class="metric-note">подтверждено</span></div></div>
+          <div class="metric"><span class="metric-label">ОШИБКА ПО X</span><div><strong id="error-x">—</strong><span class="metric-note">px</span></div></div>
+          <div class="metric"><span class="metric-label">ОШИБКА ПО Y</span><div><strong id="error-y">—</strong><span class="metric-note">px</span></div></div>
+          <div class="metric"><span class="metric-label">ПОРОГ УВЕРЕННОСТИ</span><div><strong id="confidence-metric">0.35</strong><span class="metric-note">минимум</span></div></div>
+        </div>
+
+        <section class="panel targets-panel"><div class="panel-top"><div class="section-label"><span>02</span> ОБНАРУЖЕННЫЕ ШАРИКИ</div><span class="micro muted">ПОДТВЕРЖДЕНИЕ · 3 КАДРА</span></div><div class="targets-list" id="targets"><div class="empty-targets" id="empty-targets">Подтверждённые шарики появятся здесь</div></div></section>
+
+        <details class="panel event-panel" id="event-panel"><summary><span class="section-label"><span>03</span> ЖУРНАЛ СОБЫТИЙ</span><span class="micro muted">СИСТЕМА <span id="log-chevron">⌄</span></span></summary><div class="event-list" id="event-list"></div></details>
+      </section>
+
+      <aside class="controls-column" aria-label="Управление наведением">
+        <section class="panel target-panel">
+          <div class="panel-top"><div class="section-label"><span class="tiny-cross">⌖</span> ВЫБРАННАЯ ЦЕЛЬ</div><button id="clear-target" class="icon-button" title="Сбросить выбор" aria-label="Сбросить выбор">×</button></div>
+          <div class="selected-heading"><div class="target-number" id="selected-number">—</div><div><h2 id="selected-title">Цель не выбрана</h2><p id="selected-subtitle">Нажмите на шарик в кадре</p></div></div>
+          <div class="tracking-state" id="tracking-state"><span class="status-dot" id="tracking-dot"></span><span id="tracking-reason">Выберите шарик на видео</span></div>
+          <button class="primary-button" id="start-tracking" disabled><svg viewBox="0 0 24 24"><path d="m8 5 11 7-11 7z"/></svg><span>Начать наведение</span></button>
+          <button class="stop-button" id="stop-tracking"><span class="stop-symbol"></span> Остановить наведение <kbd>Space</kbd></button>
+        </section>
+
+        <section class="panel connection-panel">
+          <div class="panel-top"><div class="section-label">КОНТРОЛЛЕР</div><span class="pill" id="controller-badge">НЕ ПОДКЛЮЧЁН</span></div>
+          <div class="mode-switch" role="group" aria-label="Режим контроллера"><button id="mode-real" class="selected" type="button">SimpleBGC</button><button id="mode-sim" type="button">Симуляция</button></div>
+          <div class="connection-fields" id="connection-fields"><div class="field"><label for="serial-port">COM-порт <button id="refresh-ports" class="inline-button" title="Обновить порты" aria-label="Обновить порты">↻</button></label><select id="serial-port"><option value="">Ищем порты…</option></select></div><div class="field"><label for="baud">Скорость</label><select id="baud"><option value="115200">115 200</option><option value="57600">57 600</option><option value="38400">38 400</option><option value="230400">230 400</option></select></div></div>
+          <p class="port-description" id="port-description">Подключение к USB / UART</p>
+          <button class="secondary-button full" id="connect-controller">Подключить контроллер <span>↗</span></button>
+          <div class="controller-info hidden" id="controller-info"><div><span>Плата</span><b id="board-version">—</b></div><div><span>Прошивка</span><b id="firmware">—</b></div></div>
+          <div class="motor-controls"><div class="motor-status"><span>Моторы</span><b id="motor-status">Нет подключения</b></div><button class="motor-button" id="toggle-motors" disabled>Включить моторы</button></div>
+          <div class="axis-values"><div><span>YAW</span><strong id="yaw-angle">—<small>°</small></strong><em id="yaw-command">0.0 °/с</em></div><div><span>PITCH</span><strong id="pitch-angle">—<small>°</small></strong><em id="pitch-command">0.0 °/с</em></div></div>
+          <details class="manual-controls"><summary>Проверка направления <span>⌄</span></summary><div class="jog-row"><div class="jog-pad"><button data-pitch="1" data-yaw="0" class="jog-up" aria-label="Наклон вверх">↑</button><button data-pitch="0" data-yaw="-1" class="jog-left" aria-label="Поворот влево">←</button><span class="jog-center">⌖</span><button data-pitch="0" data-yaw="1" class="jog-right" aria-label="Поворот вправо">→</button><button data-pitch="-1" data-yaw="0" class="jog-down" aria-label="Наклон вниз">↓</button></div><p>Короткий импульс<br><b>0,2 секунды</b><br><span>до 3°/с</span></p></div><button class="text-button home-button" id="set-home">Принять положение за 0°</button></details>
+        </section>
+
+        <section class="panel settings-panel"><div class="panel-top"><div class="section-label">ПАРАМЕТРЫ НАВЕДЕНИЯ</div><span class="micro muted">PITCH / YAW</span></div>
+            <form id="settings-form">
+              <p class="micro muted">Скорость достигает заданного максимума вдали от центра. Чувствительность X/Y сужает зону плавного торможения.</p>
+            <div class="range-field"><label for="max-speed">Максимальная скорость <output id="max-speed-value">6 °/с</output></label><input id="max-speed" name="max_speed" type="range" min="0.5" max="30" step="0.5" value="6"><div class="range-limits"><span>0,5°/с</span><span>30°/с</span></div></div>
+            <div class="settings-grid"><div class="field"><label for="gain-yaw">Чувствительность X</label><input type="number" id="gain-yaw" name="gain_yaw" min="0.5" max="40" step="0.5" value="8"></div><div class="field"><label for="gain-pitch">Чувствительность Y</label><input type="number" id="gain-pitch" name="gain_pitch" min="0.5" max="40" step="0.5" value="8"></div><div class="field"><label for="deadband">Зона покоя, px</label><input type="number" id="deadband" name="deadband_px" min="1" max="50" value="7"></div><div class="field"><label for="threshold">Уверенность ≥</label><input type="number" id="threshold" name="confidence" min="0.35" max="0.99" step="0.01" value="0.35"></div></div>
+            <div class="field"><label for="braking-lookahead">Предторможение, с</label><input id="braking-lookahead" name="braking_lookahead" type="number" min="0" max="0.35" step="0.01" value="0.28"><p class="micro muted">Заранее снижает скорость при сближении с целью. 0 — выключено.</p></div>
+            <div class="switch-row"><label for="invert-yaw">Инверсия Yaw</label><label class="switch"><input id="invert-yaw" name="invert_yaw" type="checkbox"><span></span></label></div><div class="switch-row"><label for="invert-pitch">Инверсия Pitch</label><label class="switch"><input id="invert-pitch" name="invert_pitch" type="checkbox"><span></span></label></div>
+            <details class="limits-settings"><summary>Ограничения движения <span>⌄</span></summary><div class="settings-grid"><div class="field"><label for="yaw-limit">Yaw, ±°</label><input id="yaw-limit" name="yaw_limit" type="number" min="5" max="120" value="45"></div><div class="field"><label for="pitch-limit">Pitch, ±°</label><input id="pitch-limit" name="pitch_limit" type="number" min="5" max="75" value="30"></div></div><div class="field acceleration-field"><label for="acceleration">Разгон, °/с²</label><input id="acceleration" name="acceleration" type="number" min="1" max="120" value="25"></div><p class="micro muted">Углы относительно положения при подключении.</p></details>
+              <details class="limits-settings"><summary>Совмещение лазера с камерой <span>⌄</span></summary>
+                <p class="micro muted">Остановите наведение. На рабочем расстоянии нажмите «Указать пятно», затем кликните по пятну лазера в видео. Поправка действует для этого расстояния.</p>
+                <div class="settings-grid"><div class="field"><label for="aim-x">Поправка X, % кадра</label><input id="aim-x" name="aim_x_percent" type="number" min="-40" max="40" step="0.01" value="0"></div><div class="field"><label for="aim-y">Поправка Y, % кадра</label><input id="aim-y" name="aim_y_percent" type="number" min="-40" max="40" step="0.01" value="0"></div></div>
+                <button type="button" class="secondary-button full" id="calibrate-laser">Указать пятно лазера в видео</button>
+                <button type="button" class="text-button" id="reset-aim">Сбросить поправку к центру камеры</button>
+                <p class="micro muted" id="calibration-hint">Прицел — сохранённая точка лазера для расстояния калибровки. Серый крест — центр камеры. Автоматического измерения пятна нет.</p>
+              </details>
+              <button type="submit" class="secondary-button full" id="save-settings" disabled>Применить настройки <span>✓</span></button>
+          </form>
+        </section>
+      </aside>
+    </div>
+    <footer><span><span class="footer-mark">⌖</span> BALLOON CONTROL <span class="muted">/</span> LOCAL WORKSTATION</span><span id="footer-status">SimpleBGC Serial API · Управление Pitch / Yaw</span></footer>
+  </main>
+  <button class="mobile-stop hidden" id="mobile-stop"><span class="stop-symbol"></span> Остановить наведение</button>
+  <div class="toast hidden" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
