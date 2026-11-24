@@ -13,6 +13,16 @@ let displayedFrame = -1;
 let imagePending = false;
 let lastImage = null;
 let lastFrameData = null;
+const screenMemory = new ScreenBalloonMemory();
+const screenDetectionHold = new ScreenDetectionHold();
+let heldDetections = [];
+const appearanceCanvas = document.createElement("canvas");
+appearanceCanvas.width = appearanceCanvas.height = 24;
+const appearanceContext = appearanceCanvas.getContext("2d", {willReadFrequently: true});
+const colorCanvas = document.createElement("canvas");
+const colorContext = colorCanvas.getContext("2d", {willReadFrequently: true});
+let rememberedBalloon = null;
+let screenCamera = null;
 const videoView = new VideoViewport();
 let videoDrag = null;
 let suppressVideoClick = false;
@@ -82,12 +92,19 @@ function render(data) {
   const tracking = data.tracking;
   const connected = controller.connected;
   const motors = controller.motors_enabled;
+  if ((!connected || motors !== true) && heldJogKeys.size) releaseKeyboardJog();
   $("motor-status").textContent = !connected ? "Нет подключения" : motors === true ? "Включены" : motors === false ? "Выключены" : "Проверяем состояние…";
   $("motor-status").classList.toggle("powered", connected && motors === true);
   $("toggle-motors").textContent = busy ? "Подождите…" : motors === true ? "Выключить моторы" : "Включить моторы";
   $("toggle-motors").disabled = !connected || busy || typeof motors !== "boolean";
   $("toggle-motors").classList.toggle("powered", connected && motors === true);
   const live = camera.status === "live";
+  if (!live) {
+    screenMemory.reset();
+    screenDetectionHold.clear();
+    heldDetections = [];
+    rememberedBalloon = null;
+  }
   updateViewControls();
   const isSimulated = connected && controller.info?.simulated;
   $("mobile-stop").classList.toggle("hidden", !connected);
@@ -117,7 +134,7 @@ function render(data) {
   const limited = tracking.active && tracking.limited_axes?.length > 0;
   dot($("tracking-dot"), tracking.active ? limited || !tracking.target ? "amber" : "green" : "");
   $("tracking-state").classList.toggle("limited", Boolean(limited));
-  $("start-tracking").disabled = busy || calibrationMode || (!tracking.active && (!connected || motors !== true || !tracking.target || !live));
+  $("start-tracking").disabled = busy || calibrationMode || (!tracking.active && (!connected || motors !== true || !tracking.target?.center || !live));
   $("calibrate-laser").disabled = busy || !live;
   $("calibrate-laser").textContent = calibrationMode ? "Отменить выбор пятна" : "Указать пятно лазера в видео";
   $("calibration-hint").textContent = calibrationMode ? "Разметка скрыта. Кликните по фактическому пятну лазера в видео. Наведение остановлено. Escape — отмена." : "Прицел — сохранённая точка лазера для расстояния калибровки. Серый крест — центр камеры. Автоматического измерения пятна нет.";
@@ -166,13 +183,14 @@ function renderTargets(tracks, selected) {
       caption.append(document.createElement("b"), document.createElement("small"));
       const marker = document.createElement("span"); marker.className = "selection-dot";
       card.append(thumbnail, caption, marker);
-      card.addEventListener("click", () => action(() => api("target", {track_id:track.id})));
+      card.addEventListener("click", () => action(() => api("target", {track_id:track.id, client})));
       cards.set(track.id, card); $("targets").append(card);
     }
     card.classList.toggle("selected", selected === track.id);
     card.setAttribute("aria-pressed", String(selected === track.id));
     card.querySelector("b").textContent = `Шарик #${String(track.id).padStart(2,"0")}`;
-    card.querySelector("small").textContent = `${Math.round(track.confidence*100)}% · ${Math.round(track.center[0])}, ${Math.round(track.center[1])}`;
+    const position = track.center ? track.center.map(Math.round).join(", ") : "центр не определён";
+    card.querySelector("small").textContent = `${Math.round(track.confidence*100)}% · ${position}`;
   }
 }
 
@@ -228,8 +246,10 @@ function paintFrame() {
     context.fillRect(x1-ui,labelY,textWidth+12*ui,17*ui);
     context.fillStyle = active ? "#14210f" : "#edf5ed";
     context.fillText(label,x1+5*ui,labelY+12*ui);
-    if (active) {
+    if (active && track.center) {
       const [x,y] = videoView.project(...track.center);
+      context.strokeStyle = color; context.lineWidth = ui;
+      context.beginPath(); context.arc(x,y,4*ui,0,Math.PI*2); context.stroke();
       const [ax,ay] = videoView.project(...aimPoint(data));
       const length = Math.hypot(ax-x,ay-y);
       // Keep the actual spot visible: no filled marker on the balloon or aim.
@@ -242,6 +262,33 @@ function paintFrame() {
     }
     const thumbnail = cards.get(track.id)?.querySelector("canvas");
     if (thumbnail) thumbnail.getContext("2d").drawImage(lastImage,Math.max(0,a-4),Math.max(0,b-4),c-a+8,d-b+8,0,0,56,56);
+  }
+  context.setLineDash([4*ui,4*ui]);
+  context.strokeStyle = "#bfcac9"; context.lineWidth = ui;
+  for (const track of heldDetections) {
+    if (track.id === selected && rememberedBalloon) continue;
+    const [left,top,right,bottom] = track.box;
+    const [x1,y1] = videoView.project(left,top);
+    const [x2,y2] = videoView.project(right,bottom);
+    context.strokeRect(x1,y1,x2-x1,y2-y1);
+  }
+  context.setLineDash([]);
+  if (rememberedBalloon && screenMemory.selection === selected) {
+    const [imageX,imageY] = rememberedBalloon.center;
+    if (imageX >= 0 && imageX < width && imageY >= 0 && imageY < height) {
+      const [x,y] = videoView.project(imageX,imageY);
+      const predicted = rememberedBalloon.predicted;
+      const lastSeen = rememberedBalloon.lastSeen;
+      const radius = predicted || lastSeen ? rememberedBalloon.uncertainty * videoView.zoom : 7*ui;
+      context.strokeStyle = "#ffcf83"; context.lineWidth = 1.5*ui;
+      if (predicted || lastSeen) context.setLineDash([4*ui,4*ui]);
+      context.beginPath(); context.arc(x,y,radius,0,Math.PI*2); context.stroke();
+      context.setLineDash([]);
+      context.fillStyle = "#ffcf83"; context.font = `${11*ui}px sans-serif`;
+      const label = predicted ? "Прогноз" : lastSeen ? "Был здесь" :
+        rememberedBalloon.colorOnly ? "По цвету" : "Память";
+      context.fillText(`${label} #${selected}`,x+radius+4*ui,y+14*ui);
+    }
   }
   const [cx,cy] = videoView.project(...aimPoint(data));
   if (data.settings.aim_x_percent || data.settings.aim_y_percent) {
@@ -268,6 +315,41 @@ function drawFrame(data) {
     displayedFrame = data.frame_number;
     lastImage = image;
     lastFrameData = data;
+    const camera = `${data.camera.source}/${data.camera.width}/${data.camera.height}`;
+    if (camera !== screenCamera) {
+      screenMemory.reset();
+      screenDetectionHold.clear();
+    }
+    screenCamera = camera;
+    const now = performance.now();
+    heldDetections = screenDetectionHold.update(data.tracks, now);
+    // The result is drawn on the canvas only. It never replaces the server selection.
+    rememberedBalloon = screenMemory.update(data.tracking.selected_id, data.tracks, now, track => {
+      const [left,top,right,bottom] = track.box;
+      if (right <= left || bottom <= top) return null;
+      appearanceContext.clearRect(0,0,24,24);
+      appearanceContext.drawImage(image,left,top,right-left,bottom-top,0,0,24,24);
+      return balloonColors(appearanceContext.getImageData(0,0,24,24).data);
+    });
+    if ((rememberedBalloon?.predicted || rememberedBalloon?.lastSeen) &&
+        !data.tracks.some(track => track.id === screenMemory.selection && track.center)) {
+      const colorMark = screenMemory.followOrange(now, ([x,y],radius,size) => {
+        const left = Math.max(0, Math.floor(x-radius)), top = Math.max(0, Math.floor(y-radius));
+        const right = Math.min(data.camera.width, Math.ceil(x+radius));
+        const bottom = Math.min(data.camera.height, Math.ceil(y+radius));
+        const width = right-left, height = bottom-top;
+        if (width < 8 || height < 8) return null;
+        const scale = Math.min(1, 192 / Math.max(width,height));
+        const w = Math.round(width*scale), h = Math.round(height*scale);
+        if (colorCanvas.width !== w) colorCanvas.width = w;
+        if (colorCanvas.height !== h) colorCanvas.height = h;
+        colorContext.drawImage(image,left,top,width,height,0,0,w,h);
+        const center = findOrangeRegion(colorContext.getImageData(0,0,w,h).data,w,h,
+                                        [(x-left)*w/width,(y-top)*h/height],size*scale);
+        return center && [left+center[0]*width/w,top+center[1]*height/h];
+      });
+      if (colorMark) rememberedBalloon = colorMark;
+    }
     paintFrame();
   };
   image.onerror = () => { imagePending = false; };
@@ -346,14 +428,14 @@ canvas.addEventListener("click", event => {
     const [a,b,c,d] = track.box; const padding = 8*ui/videoView.zoom;
     return x>=a-padding && x<=c+padding && y>=b-padding && y<=d+padding;
   }).sort((a,b) => Math.hypot(x-a.center[0],y-a.center[1])-Math.hypot(x-b.center[0],y-b.center[1]))[0];
-  if (track) action(() => api("target",{track_id:track.id}));
+  if (track) action(() => api("target",{track_id:track.id,client}));
   else toast("Нажмите на рамку шарика или выберите его в списке под видео");
 });
 
 $("start-tracking").addEventListener("click", () => action(() => state?.tracking.active ? api("stop") : api("start",{client})));
 $("stop-tracking").addEventListener("click", () => api("stop").catch(error => toast(error.message,true)));
 $("mobile-stop").addEventListener("click", () => api("stop").catch(error => toast(error.message,true)));
-$("clear-target").addEventListener("click", () => action(() => api("target",{track_id:null})));
+$("clear-target").addEventListener("click", () => action(() => api("target",{track_id:null,client})));
 $("camera-toggle").addEventListener("click", () => action(async () => {
   if (["live","starting"].includes(state?.camera.status)) await api("camera/stop");
   else { displayedFrame = -1; await api("camera/start",{source:Number($("camera-source").value)}); }
@@ -412,26 +494,87 @@ form.addEventListener("submit",event => {
 });
 $("view-log").addEventListener("click",() => { $("event-panel").open = true; $("event-panel").scrollIntoView({behavior:"smooth",block:"center"}); });
 $("view-control").addEventListener("click",() => window.scrollTo({top:0,behavior:"smooth"}));
+const jogKeys = new Map([["KeyW", [1, 0]], ["KeyA", [0, -1]], ["KeyS", [-1, 0]], ["KeyD", [0, 1]]]);
+const heldJogKeys = new Set();
+let jogPending = false;
+let jogNeedsStop = false;
+
+async function updateKeyboardJog() {
+  if (jogPending) return;
+  const direction = jogKeys.get(Array.from(heldJogKeys).at(-1));
+  if (!direction && !jogNeedsStop) return;
+  jogPending = true;
+  jogNeedsStop = Boolean(direction);
+  try {
+    if (direction) {
+      const [pitch, yaw] = direction;
+      await api("jog", {client, pitch, yaw});
+    } else {
+      await api("jog/stop", {client});
+    }
+  } catch (error) {
+    heldJogKeys.clear();
+    toast(error.message, true);
+  } finally {
+    jogPending = false;
+    if (!heldJogKeys.size && jogNeedsStop) updateKeyboardJog();
+  }
+}
+
+function releaseKeyboardJog() {
+  heldJogKeys.clear();
+  updateKeyboardJog();
+}
+
 document.addEventListener("keydown",event => {
-  const editing = ["INPUT","SELECT","TEXTAREA"].includes(document.activeElement?.tagName);
+  const editing = ["INPUT","SELECT","TEXTAREA"].includes(event.target?.tagName) || event.target?.isContentEditable;
   if (event.code === "Escape" || event.code === "Space" && !editing) {
+    releaseKeyboardJog();
     calibrationMode = false;
     event.preventDefault(); api("stop").catch(error => toast(error.message,true));
+    return;
   }
+  if (editing || event.ctrlKey || event.metaKey || event.altKey || event.repeat || !jogKeys.has(event.code)) return;
+  if (busy || calibrationMode || !state?.controller.connected || state.controller.motors_enabled !== true) return;
+  event.preventDefault();
+  heldJogKeys.add(event.code);
+  updateKeyboardJog();
 });
+document.addEventListener("keyup", event => {
+  if (heldJogKeys.delete(event.code)) updateKeyboardJog();
+});
+document.addEventListener("focusin", event => {
+  if (event.target.matches("input, select, textarea") || event.target.isContentEditable) releaseKeyboardJog();
+});
+window.addEventListener("blur", releaseKeyboardJog);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseKeyboardJog();
+});
+setInterval(updateKeyboardJog, 80);
 
 const stream = new EventSource(`/api/events?client=${encodeURIComponent(client)}`);
+let lastPanelRender = -Infinity;
 stream.onopen = () => { dot($("connection-dot"),"green"); $("connection-text").textContent = "Локальная панель онлайн"; $("rail-online").classList.add("online"); };
 stream.onmessage = event => {
-  try { const data = JSON.parse(event.data); render(data); drawFrame(data); }
+  try {
+    const data = JSON.parse(event.data);
+    const now = performance.now();
+    if (now - lastPanelRender >= 80 || data.camera.status !== state?.camera.status) {
+      lastPanelRender = now;
+      render(data);
+    }
+    drawFrame(data);
+  }
   catch (error) { console.error("Не удалось отобразить кадр",error); }
 };
 stream.onerror = () => {
+  releaseKeyboardJog();
   dot($("connection-dot"),"red"); $("connection-text").textContent = "Связь с панелью потеряна";
   $("rail-online").classList.remove("online"); $("start-tracking").disabled = true;
 };
 setInterval(() => { if (state?.tracking.active) api("heartbeat",{client}).catch(() => {}); },400);
 window.addEventListener("pagehide",() => {
+  releaseKeyboardJog();
   if (state?.tracking.active) fetch("/api/stop",{method:"POST",headers:{"Content-Type":"application/json","X-Control-Token":token},body:"{}",keepalive:true}).catch(() => {});
   stream.close();
 });

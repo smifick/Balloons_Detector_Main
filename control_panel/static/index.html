@@ -8,6 +8,7 @@
   <title>Balloon Control — SimpleBGC</title>
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/video_view.js" defer></script>
+  <script src="/static/screen_memory.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -76,7 +77,7 @@
           <div class="controller-info hidden" id="controller-info"><div><span>Плата</span><b id="board-version">—</b></div><div><span>Прошивка</span><b id="firmware">—</b></div></div>
           <div class="motor-controls"><div class="motor-status"><span>Моторы</span><b id="motor-status">Нет подключения</b></div><button class="motor-button" id="toggle-motors" disabled>Включить моторы</button></div>
           <div class="axis-values"><div><span>YAW</span><strong id="yaw-angle">—<small>°</small></strong><em id="yaw-command">0.0 °/с</em></div><div><span>PITCH</span><strong id="pitch-angle">—<small>°</small></strong><em id="pitch-command">0.0 °/с</em></div></div>
-          <details class="manual-controls"><summary>Проверка направления <span>⌄</span></summary><div class="jog-row"><div class="jog-pad"><button data-pitch="1" data-yaw="0" class="jog-up" aria-label="Наклон вверх">↑</button><button data-pitch="0" data-yaw="-1" class="jog-left" aria-label="Поворот влево">←</button><span class="jog-center">⌖</span><button data-pitch="0" data-yaw="1" class="jog-right" aria-label="Поворот вправо">→</button><button data-pitch="-1" data-yaw="0" class="jog-down" aria-label="Наклон вниз">↓</button></div><p>Короткий импульс<br><b>0,2 секунды</b><br><span>до 3°/с</span></p></div><button class="text-button home-button" id="set-home">Принять положение за 0°</button></details>
+          <details class="manual-controls"><summary>Ручное управление · WASD <span>⌄</span></summary><div class="jog-row"><div class="jog-pad"><button data-pitch="1" data-yaw="0" class="jog-up" aria-label="Наклон вверх">↑</button><button data-pitch="0" data-yaw="-1" class="jog-left" aria-label="Поворот влево">←</button><span class="jog-center">⌖</span><button data-pitch="0" data-yaw="1" class="jog-right" aria-label="Поворот вправо">→</button><button data-pitch="-1" data-yaw="0" class="jog-down" aria-label="Наклон вниз">↓</button></div><p>Удерживайте <b>W / A / S / D</b><br>для движения подвеса.<br><span>Стрелки: импульс 0,2 с</span></p></div><button class="text-button home-button" id="set-home">Принять положение за 0°</button></details>
         </section>
 
         <section class="panel settings-panel"><div class="panel-top"><div class="section-label">ПАРАМЕТРЫ НАВЕДЕНИЯ</div><span class="micro muted">PITCH / YAW</span></div>

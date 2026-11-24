@@ -33,14 +33,18 @@ class Track:
     visible: bool = True
     vx: float = 0
     vy: float = 0
+    visible_center: list[float] | None = None
+    confirmed_at: float | None = None
 
     def public(self):
         return {"id": self.id, "box": self.box[:], "confidence": self.confidence,
-                "center": list(center(self.box)), "streak": self.streak,
+                "center": self.visible_center, "streak": self.streak,
                 "visible": self.visible, "observed_at": self.seen_at}
 
 
 class Tracker:
+    reacquire_window = 0.15
+
     def __init__(self, confirmations=3, max_age=0.6):
         self.confirmations = confirmations
         self.max_age = max_age
@@ -81,9 +85,17 @@ class Tracker:
             dt = max(0.001, now - track.seen_at)
             track.vx = 0.5 * track.vx + 0.5 * (x - old_x) / dt
             track.vy = 0.5 * track.vy + 0.5 * (y - old_y) / dt
-            track.streak = track.streak + 1 if track.visible else 1
+            if track.visible:
+                track.streak += 1
+            elif track.confirmed_at is not None and now - track.confirmed_at < self.reacquire_window:
+                track.streak = self.confirmations
+            else:
+                track.streak = 1
             track.box, track.confidence = list(box), detections[i]["confidence"]
+            track.visible_center = detections[i].get("center", list(center(box)))
             track.seen_at, track.visible = now, True
+            if track.streak >= self.confirmations and track.visible_center is not None:
+                track.confirmed_at = now
             used_tracks.add(key)
             used_detections.add(i)
         for key, track in self.tracks.items():
@@ -93,7 +105,9 @@ class Tracker:
             if i not in used_detections:
                 key = self.next_id
                 self.next_id += 1
-                self.tracks[key] = Track(key, list(detection["box"]), detection["confidence"], now)
+                box = detection["box"]
+                self.tracks[key] = Track(key, list(box), detection["confidence"], now,
+                                         visible_center=detection.get("center", list(center(box))))
         return self.confirmed(now)
 
     def confirmed(self, now):
@@ -132,10 +146,26 @@ class MotionControl:
         self.last_observation = None
         self.image_velocity = [0.0, 0.0]
 
+    def limit_rate(self, rate, offset, bound, axis):
+        # Look ahead beyond the telemetry interval so braking begins inside the limit.
+        if rate > 0:
+            limited = min(rate, max(0, (bound - offset) / 0.3))
+        else:
+            limited = max(rate, min(0, (-bound - offset) / 0.3))
+        if abs(limited - rate) > 1e-6:
+            self.limited_axes.append(axis)
+        return limited
+
+    def coast(self, rates, offsets, settings, factor):
+        self.limited_axes = []
+        self.pitch_speed = self.limit_rate(rates[0] * factor, offsets[0], settings.pitch_limit, "Pitch")
+        self.yaw_speed = self.limit_rate(rates[1] * factor, offsets[1], settings.yaw_limit, "Yaw")
+        return self.pitch_speed, self.yaw_speed
+
     def compute(self, target, dimensions, offsets, settings, dt):
         self.limited_axes = []
         width, height = dimensions
-        x, y = center(target["box"])
+        x, y = target["center"] if "center" in target else center(target["box"])
         ax, ay = aim_point(dimensions, settings)
         ex, ey = x - ax, y - ay
         stamp = target.get("observed_at")
@@ -155,7 +185,7 @@ class MotionControl:
                 self.last_observation = (identity, stamp, (ex, ey))
         self.braking_axes = []
 
-        def approach_speed(error, half_frame, gain, velocity, axis):
+        def approach_error(error, half_frame, gain, velocity, axis):
             # Predict closing motion only. Prediction can brake to zero, never
             # reverse before the measured target has actually crossed the aim.
             distance_to_aim = abs(error)
@@ -166,13 +196,22 @@ class MotionControl:
             # Reach the selected speed away from the target; taper only near
             # the deadband. Gain controls the width of this braking region.
             distance = max(0.0, distance_to_aim - settings.deadband_px)
-            return math.copysign(settings.max_speed * math.tanh(gain * distance / half_frame), error)
+            return math.copysign(gain * distance / half_frame, error)
 
-        yaw = approach_speed(ex, width / 2, settings.gain_yaw, self.image_velocity[0], "Yaw")
-        pitch = -approach_speed(ey, height / 2, settings.gain_pitch, self.image_velocity[1], "Pitch")
+        yaw = approach_error(ex, width / 2, settings.gain_yaw, self.image_velocity[0], "Yaw")
+        pitch = -approach_error(ey, height / 2, settings.gain_pitch, self.image_velocity[1], "Pitch")
+        distance = math.hypot(pitch, yaw)
+        speed_scale = settings.max_speed * math.tanh(distance) / distance if distance else 0.0
+        pitch *= speed_scale
+        yaw *= speed_scale
         yaw *= -1 if settings.invert_yaw else 1
         pitch *= -1 if settings.invert_pitch else 1
         maximum_delta = settings.acceleration * min(max(dt, 0), 0.05)
+        # Share the acceleration ramp so a diagonal command keeps its direction.
+        pitch_increase = max(0.0, abs(pitch) - abs(self.pitch_speed)) if pitch * self.pitch_speed >= 0 else 0.0
+        yaw_increase = max(0.0, abs(yaw) - abs(self.yaw_speed)) if yaw * self.yaw_speed >= 0 else 0.0
+        acceleration_scale = maximum_delta / max(maximum_delta, pitch_increase, yaw_increase, 1e-9)
+
         def limited(desired, previous, offset, bound, axis):
             desired = max(-settings.max_speed, min(settings.max_speed, desired))
             # Acceleration limits speed-up only. Ramping a stop/reversal with
@@ -183,16 +222,8 @@ class MotionControl:
             elif abs(desired) < abs(previous):
                 value = desired
             else:
-                value = previous + max(-maximum_delta, min(maximum_delta, desired - previous))
-            before_limit = value
-            # Look ahead beyond the telemetry interval so braking begins inside the limit.
-            if value > 0:
-                value = min(value, max(0, (bound - offset) / 0.3))
-            elif value < 0:
-                value = max(value, min(0, (-bound - offset) / 0.3))
-            if abs(value - before_limit) > 1e-6:
-                self.limited_axes.append(axis)
-            return value
+                value = previous + acceleration_scale * (desired - previous)
+            return self.limit_rate(value, offset, bound, axis)
         self.pitch_speed = limited(pitch, self.pitch_speed, offsets[0], settings.pitch_limit, "Pitch")
         self.yaw_speed = limited(yaw, self.yaw_speed, offsets[1], settings.yaw_limit, "Yaw")
         return self.pitch_speed, self.yaw_speed, ex, ey

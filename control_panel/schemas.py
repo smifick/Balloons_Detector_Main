@@ -39,6 +39,7 @@ class JogInput(ClientInput):
 
 class TargetInput(Input):
     track_id: int | None = Field(default=None, ge=1)
+    client: str | None = Field(default=None, min_length=8, max_length=80)
 
 
 class CameraInput(Input):

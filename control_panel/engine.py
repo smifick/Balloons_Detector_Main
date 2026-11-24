@@ -10,6 +10,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from importlib.util import find_spec
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -35,6 +36,7 @@ class Engine:
                 pass
         self.tracker = Tracker()
         self.motion = MotionControl()
+        self.last_target_motion = None
         self.board = None
         self.board_info = None
         self.board_error = None
@@ -134,6 +136,7 @@ class Engine:
         self.jog_until = 0
         self.owner = None
         self.motion.reset()
+        self.last_target_motion = None
         self.command = {"pitch": 0.0, "yaw": 0.0}
         self.reason = reason
         if self.board:
@@ -147,13 +150,25 @@ class Engine:
             self._stop_locked(reason)
             self.log(reason)
 
-    def select(self, track_id):
+    def select(self, track_id, client=None):
         with self.lock:
             track = self.tracker.tracks.get(track_id)
             now = time.monotonic()
             if track_id is not None and (not track or not track.visible or
                     track.streak < self.tracker.confirmations or now - track.seen_at > 0.2):
                 raise ValueError("Цель уже не видна. Выберите шарик на текущем кадре.")
+            if self.active and client is not None and self.owner != client:
+                raise ValueError("Управление уже запущено в другой вкладке")
+            if self.active and client is not None and track_id is not None:
+                if track.visible_center is None:
+                    raise ValueError("Центр шарика пока не определён")
+                if self.selected_id != track_id:
+                    self.selected_id = track_id
+                    self.last_target_motion = None
+                    self.heartbeat_at = now
+                    self.reason = "Переход к выбранному шарику"
+                    self.log(f"Выбрана цель #{track_id:02d}")
+                return
             self._stop_locked("Цель выбрана. Нажмите «Начать наведение».")
             self.selected_id = track_id
             if track_id is None:
@@ -197,10 +212,13 @@ class Engine:
             track = self.tracker.tracks.get(self.selected_id)
             if not track or not track.visible or track.streak < self.tracker.confirmations or now - track.seen_at > 0.2:
                 raise ValueError("Выберите подтверждённую цель на видео")
+            if track.visible_center is None:
+                raise ValueError("Центр видимой части шарика пока не определён")
             self._configure_locked()
             self.owner = client
             self.heartbeat_at = time.monotonic()
             self.motion.reset()
+            self.last_target_motion = None
             self.active = True
             self.reason = "Наведение на центр выбранного шарика"
             self.log(f"Наведение запущено: цель #{self.selected_id:02d}")
@@ -212,14 +230,20 @@ class Engine:
 
     def jog(self, pitch, yaw, client):
         with self.lock:
-            self._stop_locked("Проверка направления")
-            self._configure_locked()
+            if self.owner != client or self.jog_until <= time.monotonic():
+                self._stop_locked("Ручное управление")
+                self._configure_locked()
             speed = min(3, self.settings.max_speed)
             self.jog_rates = (pitch * speed * (-1 if self.settings.invert_pitch else 1),
                               yaw * speed * (-1 if self.settings.invert_yaw else 1))
             self.jog_until = time.monotonic() + 0.2
             self.owner = client
             self.heartbeat_at = time.monotonic()
+
+    def stop_jog(self, client):
+        with self.lock:
+            if self.jog_until and self.owner == client:
+                self._stop_locked("Ручное управление остановлено")
 
     def set_home(self):
         with self.lock:
@@ -284,12 +308,21 @@ class Engine:
                     elif not track:
                         self._stop_locked("Выбранная цель потеряна. Выберите шарик снова.")
                         self.log(self.reason, "warning")
-                    elif not track.visible or track.streak < self.tracker.confirmations or now - track.seen_at > 0.15:
-                        self.motion.reset()
-                        self.reason = "Цель временно не видна — движение остановлено"
+                    elif (not track.visible or track.streak < self.tracker.confirmations or
+                          now - track.seen_at >= self.tracker.reacquire_window or track.visible_center is None):
+                        last = self.last_target_motion
+                        if last is not None and now - last[0] < self.tracker.reacquire_window:
+                            factor = max(0.0, 1 - max(0, now - last[0]) / self.tracker.reacquire_window)
+                            pitch, yaw = self.motion.coast(last[1], offsets, self.settings, factor)
+                            self.reason = "Краткий пропуск распознавания — плавное торможение"
+                        else:
+                            self.motion.reset()
+                            self.last_target_motion = None
+                            self.reason = "Цель временно не видна — движение остановлено"
                     else:
                         pitch, yaw, ex, ey = self.motion.compute(track.public(), self.dimensions,
                                                                 offsets, self.settings, dt)
+                        self.last_target_motion = (track.seen_at, (pitch, yaw))
                         self.error_px = {"x": ex, "y": ey}
                         if abs(ex) <= self.settings.deadband_px and abs(ey) <= self.settings.deadband_px:
                             self.reason = ("Цель в точке прицеливания" if
@@ -343,6 +376,7 @@ class Engine:
             self.camera_status = "starting"
             self.camera_error = None
             self.frame_b64 = None
+            self.frame_at = self.fps = self.inference_ms = 0.0
             self.camera_thread = threading.Thread(target=self._camera_loop, args=(source, generation),
                                                   name="balloon-camera", daemon=True)
             self.camera_thread.start()
@@ -362,86 +396,160 @@ class Engine:
 
     def _camera_loop(self, source, generation):
         cap = None
+        capture = None
+        stopped = threading.Event()
+        available = threading.Condition()
+        latest = deque(maxlen=1)
         try:
             import cv2
             import torch
             os.environ.setdefault("YOLO_CONFIG_DIR", str(ROOT / ".yolo"))
             from ultralytics import YOLO
             from detection_filter import filter_result, load_regions
+            from .balloon_geometry import visible_center
             weights = ROOT / "models/balloon.pt"
             if not weights.is_file():
                 weights = ROOT / "runs/balloon_yolov8n/weights/best.pt"
             if not weights.is_file():
                 raise FileNotFoundError("Не найдены обученные веса детектора")
             device = 0 if torch.cuda.is_available() else "cpu"
-            model = YOLO(str(weights))
+            if device == "cpu":
+                torch.set_num_threads(min(2, torch.get_num_threads()))
+                if torch.get_num_interop_threads() > 1:
+                    torch.set_num_interop_threads(1)
+            config_path = ROOT / "camera_config.json"
+            camera_config = json.loads(config_path.read_text(encoding="utf-8")).get(str(source), {}) if config_path.is_file() else {}
+            model_path = weights
+            if device == "cpu" and (cpu_model := camera_config.get("cpu_openvino_model")):
+                candidate = ROOT / cpu_model
+                if candidate.is_dir() and find_spec("openvino") is not None:
+                    model_path = candidate
+            model = YOLO(str(model_path), task="detect")
             cap = cv2.VideoCapture(source, cv2.CAP_DSHOW if os.name == "nt" else cv2.CAP_ANY)
             if not cap.isOpened():
                 raise RuntimeError(f"Камера {source} недоступна. Закройте другие программы с камерой.")
-            config_path = ROOT / "camera_config.json"
-            camera_config = json.loads(config_path.read_text(encoding="utf-8")).get(str(source), {}) if config_path.is_file() else {}
             if camera_config:
+                if fourcc := camera_config.get("capture_fourcc"):
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(camera_config["capture_width"]))
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(camera_config["capture_height"]))
+                if capture_fps := camera_config.get("capture_fps"):
+                    cap.set(cv2.CAP_PROP_FPS, capture_fps)
             inference_size = int(camera_config.get("inference_size", 640))
+            if device == "cpu":
+                inference_size = int(camera_config.get("cpu_inference_size", inference_size))
+            crop_to_reference = camera_config.get("center_crop_to_reference", False)
+            mjpeg = cv2.VideoWriter_fourcc(*"MJPG")
+            native_jpeg = (
+                not crop_to_reference and cap.getBackendName() == "V4L2"
+                and int(cap.get(cv2.CAP_PROP_FOURCC)) == mjpeg
+                and cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
+            )
+            capture_dimensions = (int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                  int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)))
             from .camera_geometry import center_crop_reference
+
+            def read_frames():
+                previous = None
+                try:
+                    while not stopped.is_set() and not self.shutdown_event.is_set():
+                        ok, frame = cap.read()
+                        captured_at = time.monotonic()
+                        if not ok or frame is None:
+                            raise RuntimeError("Камера перестала отдавать кадры")
+                        if crop_to_reference:
+                            frame = center_crop_reference(frame)
+                        with available:
+                            latest.append(frame)
+                            available.notify()
+                        if native_jpeg:
+                            width, height = capture_dimensions
+                            encoded = frame
+                        else:
+                            height, width = frame.shape[:2]
+                            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                            if not ok:
+                                raise RuntimeError("Не удалось подготовить изображение камеры")
+                        frame_b64 = base64.b64encode(encoded).decode("ascii")
+                        with self.lock:
+                            if generation != self.camera_generation or stopped.is_set():
+                                return
+                            self.dimensions = (width, height)
+                            self.frame_number += 1
+                            self.frame_b64 = frame_b64
+                            if previous is not None:
+                                rate = 1 / max(captured_at - previous, 0.001)
+                                self.fps = 0.9 * self.fps + 0.1 * rate if self.fps else rate
+                        previous = captured_at
+                except Exception as error:
+                    self._camera_failed(generation, error)
+                finally:
+                    cap.release()
+                    stopped.set()
+                    with available:
+                        available.notify()
+
+            capture = threading.Thread(target=read_frames, name="balloon-video", daemon=True)
+            capture.start()
             regions = None
-            previous = time.monotonic()
-            while not self.shutdown_event.is_set():
+            while not stopped.is_set() and not self.shutdown_event.is_set():
                 with self.lock:
                     if generation != self.camera_generation:
                         return
                     threshold = self.settings.confidence
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    raise RuntimeError("Камера перестала отдавать кадры")
-                if camera_config.get("center_crop_to_reference", False):
-                    frame = center_crop_reference(frame)
+                with available:
+                    available.wait_for(lambda: latest or stopped.is_set(), timeout=0.1)
+                    if not latest or stopped.is_set():
+                        continue
+                    frame = latest.pop()
+                if native_jpeg:
+                    frame = cv2.imdecode(frame, cv2.IMREAD_COLOR)
+                    if frame is None:
+                        continue
                 height, width = frame.shape[:2]
                 if regions is None:
                     regions = load_regions(ROOT / "camera_exclusions.json", source, frame.shape)
                 infer_start = time.monotonic()
                 result = model.predict(frame, conf=threshold, iou=0.4, imgsz=inference_size, device=device, verbose=False)[0]
-                inference_ms = (time.monotonic() - infer_start) * 1000
                 result.update(boxes=result.boxes.data[result.boxes.conf >= threshold])
                 filter_result(result, regions)
                 detections = [{"box": box.xyxy[0].tolist(), "confidence": float(box.conf[0])} for box in result.boxes]
-                ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-                if not ok:
-                    raise RuntimeError("Не удалось подготовить изображение камеры")
-                now = time.monotonic()
+                for detection in detections:
+                    detection["center"] = visible_center(frame, detection["box"])
+                inference_ms = (time.monotonic() - infer_start) * 1000
                 with self.lock:
-                    if generation != self.camera_generation:
+                    if generation != self.camera_generation or stopped.is_set() or self.camera_status == "error":
                         return
-                    self.tracker.update(detections, now)
-                    self.dimensions = (width, height)
-                    self.frame_at = now
-                    self.frame_number += 1
-                    self.frame_b64 = base64.b64encode(encoded).decode("ascii")
+                    self.frame_at = time.monotonic()
+                    self.tracker.update(detections, self.frame_at)
                     self.inference_ms = inference_ms
-                    self.fps = 0.9 * self.fps + 0.1 / max(now - previous, 0.001) if self.fps else 1 / max(now - previous, 0.001)
                     self.device = "RTX 3060 / CUDA" if device == 0 else "CPU"
                     if self.camera_status != "live":
                         self.log(f"Камера {source}: {width}×{height}, детектор готов")
                     self.camera_status = "live"
-                previous = now
         except Exception as error:
-            with self.lock:
-                if generation == self.camera_generation:
-                    self.camera_status = "error"
-                    self.camera_error = str(error)
-                    self._stop_locked("Ошибка камеры — наведение остановлено")
-                    self.log(str(error), "error")
+            self._camera_failed(generation, error)
         finally:
-            if cap:
+            stopped.set()
+            if capture is not None and capture.ident is not None:
+                capture.join()
+            elif cap:
                 cap.release()
+
+    def _camera_failed(self, generation, error):
+        with self.lock:
+            if generation == self.camera_generation:
+                self.camera_status = "error"
+                self.camera_error = str(error)
+                self._stop_locked("Ошибка камеры — наведение остановлено")
+                self.log(str(error), "error")
 
     def snapshot(self, with_frame=False):
         with self.lock:
             now = time.monotonic()
             tracks = self.tracker.confirmed(now) if self.camera_status == "live" and now - self.frame_at < 0.2 else []
             target = next((track for track in tracks if track["id"] == self.selected_id), None)
-            if target:
+            if target and target["center"] is not None:
                 cx, cy = target["center"]
                 ax, ay = aim_point(self.dimensions, self.settings)
                 error = {"x": cx - ax, "y": cy - ay}
