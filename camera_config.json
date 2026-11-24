@@ -4,5 +4,14 @@
     "capture_height": 480,
     "inference_size": 640,
     "center_crop_to_reference": true
+  },
+  "2": {
+    "capture_width": 1280,
+    "capture_height": 720,
+    "capture_fps": 30,
+    "capture_fourcc": "MJPG",
+    "inference_size": 640,
+    "cpu_inference_size": 512,
+    "cpu_openvino_model": ".runtime/balloon_openvino_model"
   }
 }

@@ -302,13 +302,51 @@ def ready_engine(engine):
 
 def test_loss_stops_motion_without_switching_to_another_target(engine):
     selected = ready_engine(engine)
-    assert engine.command["yaw"] > 0
-    now = time.monotonic()
+    previous_speed = engine.command["yaw"]
+    now = engine.frame_at + 0.06
     engine.tracker.update([detection((20,20,40,40))], now)
-    engine.control_tick(dt=0.02)
+    engine.frame_at = now
+    engine.control_tick(now, dt=0.02)
+    assert 0 < engine.command["yaw"] < previous_speed
+    now += engine.tracker.reacquire_window
+    engine.tracker.update([detection((20,20,40,40))], now)
+    engine.frame_at = now
+    engine.control_tick(now, dt=0.02)
     assert engine.command == {"pitch": 0, "yaw": 0}
     assert engine.selected_id == selected
     assert engine.active  # May re-acquire this same ID within 0.6 s.
+
+
+def test_one_missed_frame_does_not_require_reconfirming_the_selected_balloon(engine):
+    selected = ready_engine(engine)
+    missed_at = engine.frame_at + 0.04
+    engine.tracker.update([], missed_at)
+    engine.frame_at = missed_at
+    engine.control_tick(missed_at)
+    coasting = engine.command["yaw"]
+    returned_at = missed_at + 0.04
+    engine.tracker.update([detection()], returned_at)
+    engine.frame_at = returned_at
+    engine.control_tick(returned_at)
+    assert engine.selected_id == selected
+    assert engine.tracker.confirmed(returned_at)[0]["id"] == selected
+    assert engine.command["yaw"] > coasting > 0
+
+
+def test_active_owner_can_switch_target_without_rearming(engine):
+    selected = ready_engine(engine)
+    now = time.monotonic()
+    for observed_at in (now + 0.01, now + 0.02, now + 0.03):
+        engine.tracker.update([detection(), detection((365, 155, 395, 185))], observed_at)
+    other = next(track["id"] for track in engine.tracker.confirmed(now + 0.03) if track["id"] != selected)
+    with pytest.raises(ValueError):
+        engine.select(other, "other-client")
+    engine.select(other, "test-client-123")
+    engine.control_tick()
+    assert engine.active and engine.selected_id == other
+    assert engine.command["pitch"] > 0 and engine.command["yaw"] > 0
+    engine.select(None, "test-client-123")
+    assert not engine.active
 
 
 def test_displayed_error_is_relative_to_calibrated_aim(engine):
@@ -355,6 +393,23 @@ def test_manual_impulse_expires_without_browser_input(engine):
     engine.control_tick()
     assert engine.command["yaw"] == 0
     assert engine.owner is None
+
+
+def test_manual_input_renews_until_owning_tab_releases(engine):
+    engine.connect(simulated=True)
+    owner = "test-client-123"
+    engine.jog(1, 0, owner)
+    engine.control_tick()
+    assert engine.command["pitch"] > 0
+    deadline = engine.jog_until
+    engine.jog(0, -1, owner)
+    assert engine.jog_until > deadline
+    engine.stop_jog("other-client")
+    engine.control_tick()
+    assert engine.command["yaw"] < 0
+    engine.stop_jog(owner)
+    assert engine.command == {"pitch": 0.0, "yaw": 0.0}
+    assert engine.board.commands[-1] == (0, 0)
 
 
 def test_telemetry_failure_disconnects_and_stops(engine, monkeypatch):

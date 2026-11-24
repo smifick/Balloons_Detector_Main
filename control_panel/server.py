@@ -72,11 +72,20 @@ def create_app(engine=None, autostart_camera=True):
     @app.get("/api/events")
     async def events(request: Request, client: str = ""):
         async def stream():
+            last_frame = None
+            last_sent = 0.0
+            loop = asyncio.get_running_loop()
             try:
                 while not await request.is_disconnected():
                     snapshot = engine.snapshot(with_frame=True)
-                    yield "data: " + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n\n"
-                    await asyncio.sleep(0.08)
+                    frame = snapshot["frame_number"] if snapshot["frame"] else None
+                    now = loop.time()
+                    if frame != last_frame or now - last_sent >= 0.08:
+                        if frame == last_frame:
+                            snapshot["frame"] = None
+                        last_frame, last_sent = frame, now
+                        yield "data: " + json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")) + "\n\n"
+                    await asyncio.sleep(0.02)
             finally:
                 with engine.lock:
                     if client and engine.owner == client:
@@ -111,7 +120,7 @@ def create_app(engine=None, autostart_camera=True):
 
     @app.post("/api/target")
     def target(body: TargetInput):
-        engine.select(body.track_id)
+        engine.select(body.track_id, body.client)
         return engine.snapshot()
 
     @app.post("/api/start")
@@ -143,6 +152,11 @@ def create_app(engine=None, autostart_camera=True):
             engine.stop("Проверка направления остановлена")
             raise HTTPException(409, str(error))
         return engine.snapshot()
+
+    @app.post("/api/jog/stop")
+    def stop_jog(body: ClientInput):
+        engine.stop_jog(body.client)
+        return {"ok": True}
 
     @app.post("/api/home")
     def home():
